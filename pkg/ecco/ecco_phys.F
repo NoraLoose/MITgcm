@@ -33,6 +33,14 @@ c     == routine arguments ==
       integer mythid
 
 c     == local variables ==
+C     localT           :: local copy of tracer field to compute gmredi transports
+C     tmp2dmskW        :: copy of cell area mask to compute gmredi transports
+C     tmp2dmskS        :: copy of cell area mask to compute gmredi transports
+C     tmp3dmskW        :: copy of section mask
+C     tmp3dmskS        :: copy of section mask
+C     trIdentity       :: =1 for theta, =2 for salt
+C     diffKh           :: diffKhT or diffKhS
+C     df	           :: field for diffusive fluxes
 
       integer bi,bj
       integer i,j,k
@@ -40,8 +48,16 @@ c     == local variables ==
       integer imin,imax
 #ifdef ALLOW_GENCOST_CONTRIBUTION
       integer kgen, kgen3d, itr
+      integer trIdentity
+      _RL diffKh
       _RL areavolTile(nSx,nSy), areavolGlob
       _RL tmpfld, tmpvol, tmpmsk, tmpmsk2, tmpmskW, tmpmskS
+      _RL localT(1-OLx:sNx+OLx,1-OLy:sNy+OLy,Nr)
+      _RL tmp2dmskW(1-OLx:sNx+OLx,1-OLy:sNy+OLy)
+      _RL tmp2dmskS(1-OLx:sNx+OLx,1-OLy:sNy+OLy)
+      _RL tmp3dmskW(1:sNx,1:sNy,Nr)
+      _RL tmp3dmskS(1:sNx,1:sNy,Nr)
+      _RL df(1-OLx:sNx+OLx,1-OLy:sNy+OLy)
 #endif
 
 c- note defined with overlap here, not needed, but more efficient
@@ -258,6 +274,16 @@ c
               tmpmskS=gencost_mskS(i,j,k,bi,bj,kgen3d)
 #endif
             endif
+
+            if (
+     &        (gencost_barfile(kgen)(1:15).eq.'m_horflux_theta').or.
+     &        (gencost_barfile(kgen)(1:14).eq.'m_horflux_salt')
+     &      ) then
+c---------- Store local copy of section masks to add diffusive fluxes further down
+              tmp3dmskW(i,j,k)=tmpmskW
+              tmp3dmskS(i,j,k)=tmpmskS
+            endif
+
             tmpmskW=tmpmskW*hFacW(i,j,k,bi,bj)*dyG(i,j,bi,bj)*drF(k)
             tmpmskS=tmpmskS*hFacS(i,j,k,bi,bj)*dxG(i,j,bi,bj)*drF(k)
 c
@@ -266,7 +292,35 @@ c
      &          gencost_storefld(i,j,bi,bj,kgen)
      &          +uVel(i,j,k,bi,bj)*tmpmskW
      &          +vVel(i,j,k,bi,bj)*tmpmskS
-
+c
+            elseif (gencost_barfile(kgen)(1:15).eq.'m_horflux_theta')
+     & then
+c------------ advective flux; exact if using enum_centered_2nd, cf. cad_c2_adv_x/y
+              gencost_storefld(i,j,bi,bj,kgen) =
+     &          gencost_storefld(i,j,bi,bj,kgen)
+     &          +uVel(i,j,k,bi,bj)
+     &            *(theta(i,j,k,bi,bj)+theta(i-1,j,k,bi,bj))*halfRL
+     &            *HeatCapacity_Cp*rhoConst
+     &            *tmpmskW
+     &          +vVel(i,j,k,bi,bj)
+     &            *(theta(i,j,k,bi,bj)+theta(i,j-1,k,bi,bj))*halfRL
+     &            *HeatCapacity_Cp*rhoConst
+     &            *tmpmskS
+c
+            elseif (gencost_barfile(kgen)(1:14).eq.'m_horflux_salt')
+     & then
+c------------ advective flux; exact if using enum_centered_2nd, cf. cad_c2_adv_x/y
+              gencost_storefld(i,j,bi,bj,kgen) =
+     &          gencost_storefld(i,j,bi,bj,kgen)
+     &          +uVel(i,j,k,bi,bj)
+     &            *(salt(i,j,k,bi,bj)+salt(i-1,j,k,bi,bj))*halfRL
+     &            *rhoConst/1000.
+     &            *tmpmskW
+     &          +vVel(i,j,k,bi,bj)
+     &            *(salt(i,j,k,bi,bj)+salt(i,j-1,k,bi,bj))*halfRL
+     &            *rhoConst/1000.
+     &            *tmpmskS
+c------------
             ! Only compute tr[Vol,Heat,Salt] if necessary, use
             ! gencost_mask[W/S] rather than old msktrVol  
             elseif ( gencost_barfile(kgen)(1:7).eq.'m_trVol' .or. 
@@ -299,10 +353,164 @@ c now summing
                 trSalt(i,j,k,bi,bj)=trSaltW(i,j,k)+trSaltS(i,j,k)
 
             endif
-          enddo
+          enddo !k
 c---------
-         enddo
-        enddo
+         enddo !i
+        enddo !j
+
+
+c------ Add diffusive and GM/Redi fluxes to horflux_[theta/salt]
+        if (
+     &      (gencost_barfile(kgen)(1:15).eq.'m_horflux_theta').or.
+     &      (gencost_barfile(kgen)(1:14).eq.'m_horflux_salt')
+     &    ) then
+c-------- Make local copy of tracer array (for this tile)
+          if (gencost_barfile(kgen)(1:15).eq.'m_horflux_theta') then
+            do k=1,nr
+              do j=1-OLy,sNy+OLy
+                do i=1-OLx,sNx+OLx
+                  localT(i,j,k)=theta(i,j,k,bi,bj)
+                enddo
+              enddo
+            enddo
+            trIdentity = 1
+            diffKh = diffKhT
+
+          elseif (gencost_barfile(kgen)(1:14).eq.'m_horflux_salt') then
+            do k=1,nr
+              do j=1-OLy,sNy+OLy
+                do i=1-OLx,sNx+OLx
+                  localT(i,j,k)=salt(i,j,k,bi,bj)
+                enddo
+              enddo
+            enddo
+            trIdentity = 2
+            diffKh = diffKhS
+          endif
+c----------
+          do k=1,nr
+            do j=1-OLy,sNy+OLy
+              do i=1-OLx,sNx+OLx
+                tmp2dmskW(i,j)=hFacW(i,j,k,bi,bj)*dyG(i,j,bi,bj)*drF(k)
+                tmp2dmskS(i,j)=hFacS(i,j,k,bi,bj)*dxG(i,j,bi,bj)*drF(k)
+              enddo
+            enddo
+c---------- Diffusive flux in X; assume deepFacC=1; ignore biharmonic
+            if (diffKh.ne.0.) then
+              call gad_diff_x(
+     I          bi,bj,k,tmp2dmskW,diffKh,localT,
+     O          df,
+     I          myThid)
+            else
+              do j=1-OLy,sNy+OLy
+                do i=1-OLx,sNx+OLx
+                  df(i,j) = 0. _d 0
+                enddo
+              enddo
+            endif
+c---------- Add GM/Redi flux in X to df
+#ifdef ALLOW_GMREDI
+            if ( useGMredi ) then
+              iMin = 1-OLx+1
+              iMax = sNx+OLx
+              jMin = 1-OLy
+              jMax = sNy+Oly
+
+              call gmredi_xtransport(
+     I          trIdentity, bi, bj, k, iMin, iMax, jMin, jMax,
+     I          tmp2dmskW,localT,
+     U          df,
+     I          myThid )
+            endif
+#endif
+c---------- Add fluxes in X to gencost; assume rhoFacC = 1
+            if (gencost_barfile(kgen)(1:15).eq.'m_horflux_theta')
+     &      then
+              do j=1,sNy
+                do i=1,sNx
+                  tmpmskW = tmp3dmskW(i,j,k)
+
+                  gencost_storefld(i,j,bi,bj,kgen) =
+     &              gencost_storefld(i,j,bi,bj,kgen)
+     &              +df(i,j)*HeatCapacity_Cp*rhoConst
+     &                *tmpmskW
+                enddo
+              enddo
+c
+            elseif (gencost_barfile(kgen)(1:14).eq.'m_horflux_salt')
+     &      then
+              do j=1,sNy
+                do i=1,sNx
+                  tmpmskW = tmp3dmskW(i,j,k)
+
+                  gencost_storefld(i,j,bi,bj,kgen) =
+     &              gencost_storefld(i,j,bi,bj,kgen)
+     &              +df(i,j)*rhoConst/1000.
+     &                *tmpmskW
+                enddo
+              enddo
+            endif
+c
+c---------- Diffusive flux in Y; assume deepFacC=1; ignore biharmonic
+            if (diffKh.ne.0.) then
+              call gad_diff_y(
+     I          bi,bj,k,tmp2dmskS,diffKh,localT,
+     O          df,
+     I          myThid)
+            else
+              do j=1-OLy,sNy+OLy
+                do i=1-OLx,sNx+OLx
+                  df(i,j) = 0. _d 0
+                enddo
+              enddo
+            endif
+c
+c---------- Add GM/Redi flux in Y to df
+#ifdef ALLOW_GMREDI
+            if ( useGMredi ) then
+              iMin = 1-OLx
+              iMax = sNx+OLx
+              jMin = 1-OLy+1
+              jMax = sNy+Oly
+              call gmredi_ytransport(
+     I          trIdentity, bi, bj, k, iMin, iMax, jMin, jMax,
+     I          tmp2dmskS,localT,
+     U          df,
+     I          myThid )
+            endif
+#endif
+c
+c---------- Add fluxes in Y to gencost; assume rhoFacC = 1
+            if (gencost_barfile(kgen)(1:15).eq.'m_horflux_theta')
+     &      then
+              do j=1,sNy
+                do i=1,sNx
+                  tmpmskS = tmp3dmskS(i,j,k)
+
+                  gencost_storefld(i,j,bi,bj,kgen) =
+     &              gencost_storefld(i,j,bi,bj,kgen)
+     &              +df(i,j)*HeatCapacity_Cp*rhoConst
+     &                *tmpmskS
+                enddo
+              enddo
+c
+            elseif (gencost_barfile(kgen)(1:14).eq.'m_horflux_salt')
+     &      then
+              do j=1,sNy
+                do i=1,sNx
+                  tmpmskS = tmp3dmskS(i,j,k)
+
+                  gencost_storefld(i,j,bi,bj,kgen) =
+     &              gencost_storefld(i,j,bi,bj,kgen)
+     &              +df(i,j)*rhoConst/1000.
+     &                *tmpmskS
+                enddo
+              enddo
+            endif
+c
+          enddo !k
+        endif !gencost_barfile = m_horflux_[theta/salt]
+c-----------------------------------------------------------------
        enddo
       enddo
 
