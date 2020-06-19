@@ -27,6 +27,10 @@ c     == global variables ==
 # include "PTRACERS_SIZE.h"
 # include "PTRACERS_FIELDS.h"
 #endif
+#ifdef ALLOW_AUTODIFF
+# include "tamc.h"
+# include "tamc_keys.h"
+#endif
 
 c     == routine arguments ==
 
@@ -75,12 +79,21 @@ c- note defined with overlap here, not needed, but more efficient
       _RL RHOInSituLoc(1-OLx:sNx+OLx,1-OLy:sNy+OLy,Nr,nSx,nSy)
       _RL VOLsumTile(nSx,nSy),RHOsumTile(nSx,nSy)
 #endif
+#ifdef ALLOW_AUTODIFF_TAMC
+      INTEGER lact1, lact2, lact3, lact4, lmax1, lmax2, lmax3
+#endif
 
 c need to include halos for find_rho_2d
       iMin = 1-OLx
       iMax = sNx+OLx
       jMin = 1-OLy
       jMax = sNy+OLy
+
+#ifdef ALLOW_AUTODIFF_TAMC
+C--   dummy statement to end declaration part
+      ikey = 1
+      itdkey = 1
+#endif /* ALLOW_AUTODIFF_TAMC */
 
 #ifdef ALLOW_PSBAR_STERIC
 
@@ -199,6 +212,14 @@ c-- init
        enddo
       enddo
       areavolGlob=0. _d 0
+
+      if (gencost_barfile(kgen)(1:15).eq.'m_horflux_theta') then
+        trIdentity = 1
+        diffKh = diffKhT
+      elseif (gencost_barfile(kgen)(1:14).eq.'m_horflux_salt') then
+        trIdentity = 2
+        diffKh = diffKhS
+      endif
 
       do bj=myByLo(myThid),myByHi(myThid)
        do bi=myBxLo(myThid),myBxHi(myThid)
@@ -358,6 +379,19 @@ c---------
          enddo !i
         enddo !j
 
+#ifdef ALLOW_AUTODIFF_TAMC
+          lact1 = bi - myBxLo(myThid)
+          lmax1 = myBxHi(myThid) - myBxLo(myThid) + 1
+          lact2 = bj - myByLo(myThid)
+          lmax2 = myByHi(myThid) - myByLo(myThid) + 1
+          lact3 = myThid - 1
+          lmax3 = nTx*nTy
+          lact4 = ikey_dynamics - 1
+          itdkey = (lact1 + 1) + lact2*lmax1
+     &                      + lact3*lmax1*lmax2
+     &                      + lact4*lmax1*lmax2*lmax3
+#endif /* ALLOW_AUTODIFF_TAMC */
+
 
 c------ Add diffusive and GM/Redi fluxes to horflux_[theta/salt]
         if (
@@ -373,9 +407,6 @@ c-------- Make local copy of tracer array (for this tile)
                 enddo
               enddo
             enddo
-            trIdentity = 1
-            diffKh = diffKhT
-
           elseif (gencost_barfile(kgen)(1:14).eq.'m_horflux_salt') then
             do k=1,nr
               do j=1-OLy,sNy+OLy
@@ -384,10 +415,11 @@ c-------- Make local copy of tracer array (for this tile)
                 enddo
               enddo
             enddo
-            trIdentity = 2
-            diffKh = diffKhS
           endif
 c----------
+CADJ STORE localT(:,:,:) = comlev1_bibj, key=itdkey, byte=isbyte
+CADJ STORE tmp3dMskW(:,:,:) = comlev1_bibj, key=itdkey, byte=isbyte
+CADJ STORE tmp3dMskS(:,:,:) = comlev1_bibj, key=itdkey, byte=isbyte
           do k=1,nr
             do j=1-OLy,sNy+OLy
               do i=1-OLx,sNx+OLx
@@ -408,21 +440,21 @@ c---------- Diffusive flux in X; assume deepFacC=1; ignore biharmonic
                 enddo
               enddo
             endif
-c---------- Add GM/Redi flux in X to df
-#ifdef ALLOW_GMREDI
-            if ( useGMredi ) then
-              iMin = 1-OLx+1
-              iMax = sNx+OLx
-              jMin = 1-OLy
-              jMax = sNy+Oly
-
-              call gmredi_xtransport(
-     I          trIdentity, bi, bj, k, iMin, iMax, jMin, jMax,
-     I          tmp2dmskW,localT,
-     U          df,
-     I          myThid )
-            endif
-#endif
+cc---------- Add GM/Redi flux in X to df
+c#ifdef ALLOW_GMREDI
+c            if ( useGMredi ) then
+c              iMin = 1-OLx+1
+c              iMax = sNx+OLx
+c              jMin = 1-OLy
+c              jMax = sNy+Oly
+c
+c              call gmredi_xtransport(
+c     I          trIdentity, bi, bj, k, iMin, iMax, jMin, jMax,
+c     I          tmp2dmskW,localT,
+c     U          df,
+c     I          myThid )
+c            endif
+c#endif
 c---------- Add fluxes in X to gencost; assume rhoFacC = 1
             if (gencost_barfile(kgen)(1:15).eq.'m_horflux_theta')
      &      then
@@ -465,20 +497,20 @@ c---------- Diffusive flux in Y; assume deepFacC=1; ignore biharmonic
               enddo
             endif
 c
-c---------- Add GM/Redi flux in Y to df
-#ifdef ALLOW_GMREDI
-            if ( useGMredi ) then
-              iMin = 1-OLx
-              iMax = sNx+OLx
-              jMin = 1-OLy+1
-              jMax = sNy+Oly
-              call gmredi_ytransport(
-     I          trIdentity, bi, bj, k, iMin, iMax, jMin, jMax,
-     I          tmp2dmskS,localT,
-     U          df,
-     I          myThid )
-            endif
-#endif
+cc---------- Add GM/Redi flux in Y to df
+c#ifdef ALLOW_GMREDI
+c            if ( useGMredi ) then
+c              iMin = 1-OLx
+c              iMax = sNx+OLx
+c              jMin = 1-OLy+1
+c              jMax = sNy+Oly
+c              call gmredi_ytransport(
+c     I          trIdentity, bi, bj, k, iMin, iMax, jMin, jMax,
+c     I          tmp2dmskS,localT,
+c     U          df,
+c     I          myThid )
+c            endif
+c#endif
 c
 c---------- Add fluxes in Y to gencost; assume rhoFacC = 1
             if (gencost_barfile(kgen)(1:15).eq.'m_horflux_theta')
